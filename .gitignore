@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Generated data and cached API responses
+data/raw/*
+!data/raw/.gitkeep
+cache/*
+!cache/.gitkeep
+*.duckdb
+*.parquet
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Models and OS files
+*.pkl
+mlruns/
+.DS_Store
