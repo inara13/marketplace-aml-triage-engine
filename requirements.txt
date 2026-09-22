@@ -1,0 +1,14 @@
+pandas
+numpy
+duckdb
+faker
+lightgbm
+scikit-learn
+langgraph
+langchain-anthropic
+python-dotenv
+pyyaml
+requests
+streamlit
+plotly
+pytest
