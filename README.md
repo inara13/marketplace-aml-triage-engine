@@ -29,9 +29,15 @@ Jev is also used **inside** the agent for small decisions like which tool to cal
 2. Agent with the LLM making every decision vs agent with Jev handling small decisions
 3. For each: tokens, cost, runtime, recall on planted laundering cases, precision and false negatives
 
-## Synthetic typologies
+## Synthetic data
 
-Collusive buy and sell loops, overpriced listings used for trade based laundering, structured payouts under thresholds, dormant account reactivation, and mule seller networks sharing devices. Realistic noise is built in on purpose, including legit look alikes that trigger false positives and careful launderers that slip through. 
+Six months of a fake resale marketplace: about 56,000 users, 166,000 listings and 430,000 sales, plus KYC profiles, payouts and refunds.
+
+- **160 planted laundering cases** across 8 typologies: collusive loops, trade based laundering, structuring, dormant reactivation, mule networks, refund laundering, high risk geography and coded listings. Each typology has easy, medium and hard cases, and the hard ones are built to slip through
+- **240 decoys:** innocent users who look suspicious, like viral sellers, real luxury collectors and families sharing a device. They create realistic false positives
+- **A hidden answer key** in a separate database, used only for evaluation
+
+Details in [`data/typologies.md`](data/typologies.md), latest counts in [`docs/data_summary.md`](docs/data_summary.md).
 
 ## Repo structure
 
@@ -54,7 +60,6 @@ tests/         basic checks for each layer
 - Every Jev question includes an "other or unclear" option so uncertain cases escalate instead of getting forced into a wrong label
 - QC sampling: a share of auto closed alerts is re reviewed
 - Human in the loop: the agent drafts SARs, a person approves them
-- Input sanitization against prompt injection in seller written listing text
 
 ## Quick start
 
@@ -63,9 +68,12 @@ git clone https://github.com/inara13/marketplace-aml-triage-engine.git
 cd marketplace-aml-triage-engine
 pip install -r requirements.txt
 cp .env.example .env        # add your API keys
+
+# Day 1: build the synthetic marketplace, about 20 seconds
+python -m data.generator.generate
 ```
 
-Run steps for each layer will be added as they are built.
+Run steps for each later layer will be added as they are built.
 
 ## Results
 
@@ -73,13 +81,14 @@ Run steps for each layer will be added as they are built.
 
 ## Status
 
-- [ ] Synthetic marketplace data
+- [x] Synthetic marketplace data
 - [ ] Detection layer
 - [ ] Jev triage layer
 - [ ] Investigator agent
 - [ ] Benchmark
 - [ ] Dashboard
 - [ ] Write up
+- [ ] Optional: prompt injection tests on seller written listing text
 
 ## Author
 
