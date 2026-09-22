@@ -1,10 +1,22 @@
 data:
   seed: 42
+  start_date: "2026-01-01"
+  end_date: "2026-06-30"
   n_sellers: 5000
   n_buyers: 50000
-  n_transactions: 400000
-  months: 6
-  laundering_share: 0.02
+  n_transactions: 400000        # normal activity only; cases and decoys add on top
+  business_seller_share: 0.15
+  refund_rate: 0.02
+  platform_fee: 0.12            # share of each sale kept by the platform
+  payout_review_threshold: 3000 # payouts at or above this get reviewed
+  # XA to XC are ISO user-assigned codes standing in for high risk jurisdictions
+  high_risk_countries: [XA, XB, XC]
+  cases_per_typology: 20
+  difficulty_mix: {easy: 10, medium: 6, hard: 4}
+  decoys_per_type: 40
+  noise:
+    missing_rate: 0.02
+    typo_rate: 0.03
 
 detection:
   ml_score_threshold: 0.5
