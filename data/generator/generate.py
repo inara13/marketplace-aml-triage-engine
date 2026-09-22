@@ -1,0 +1,168 @@
+"""Day 1: build the synthetic resale marketplace.
+
+Run from the repo root:
+    python -m data.generator.generate
+
+Writes two DuckDB files to data/raw/:
+    marketplace.duckdb   what the monitoring system can see
+    ground_truth.duckdb  the hidden answer key, never read by detection
+and a summary to docs/data_summary.md.
+"""
+import time
+from pathlib import Path
+
+import duckdb
+import numpy as np
+import pandas as pd
+import yaml
+
+from . import normal, text
+from .common import Ctx
+from .decoys import DECOYS
+from .typologies import TYPOLOGIES
+
+ROOT = Path(__file__).resolve().parents[2]
+TABLES = ["users", "kyc_profiles", "listings", "transactions", "payouts", "refunds"]
+KEYS = {"users": "user_id", "kyc_profiles": "seller_id", "listings": "listing_id",
+        "transactions": "txn_id", "payouts": "payout_id", "refunds": "refund_id"}
+ENTITY_TABLE = {"user": "users", "listing": "listings", "transaction": "transactions",
+                "payout": "payouts", "refund": "refunds"}
+
+
+def plant(ctx):
+    d = ctx.cfg
+    mix = d["difficulty_mix"]
+    assert sum(mix.values()) == d["cases_per_typology"]
+    for name, (fn, note) in TYPOLOGIES.items():
+        for diff, count in mix.items():
+            for _ in range(count):
+                fn(ctx, ctx.new_case("laundering", name, diff, note), diff)
+    for name, (fn, note) in DECOYS.items():
+        for _ in range(d["decoys_per_type"]):
+            fn(ctx, ctx.new_case("decoy", name, None, note))
+
+
+def combine(ctx, base):
+    out = {}
+    for t in TABLES:
+        extra = pd.DataFrame(ctx.rows[t])
+        df = pd.concat([base[t], extra], ignore_index=True) if len(extra) else base[t]
+        out[t] = df
+    out["transactions"] = out["transactions"].sort_values("ts").reset_index(drop=True)
+    return out
+
+
+def add_noise(ctx, t):
+    """Realistic messiness: blanks and typos, applied to everyone including cases."""
+    rng, n = ctx.rng, ctx.cfg["noise"]
+    miss, typo = n["missing_rate"], n["typo_rate"]
+
+    k = t["kyc_profiles"]
+    k["declared_monthly_volume"] = k["declared_monthly_volume"].astype("float").mask(rng.random(len(k)) < miss)
+    k["business_type"] = k["business_type"].mask(rng.random(len(k)) < miss / 2)
+
+    li = t["listings"]
+    hit = rng.random(len(li)) < typo
+    li.loc[hit, "description"] = [text.add_typo(rng, s) for s in li.loc[hit, "description"]]
+    li["description"] = li["description"].mask(rng.random(len(li)) < miss * 0.75)
+
+    tx = t["transactions"]
+    tx["payment_method"] = tx["payment_method"].mask(rng.random(len(tx)) < miss / 2)
+
+    u = t["users"]
+    u["country"] = u["country"].mask(rng.random(len(u)) < miss / 4)
+
+
+def validate(t, gt_members):
+    """Integrity checks. Any failure stops the run."""
+    checks = {}
+    for name, key in KEYS.items():
+        checks[f"{name} ids unique"] = t[name][key].is_unique
+    tx, li, us = t["transactions"], t["listings"], t["users"]
+    seller_of = li.set_index("listing_id")["seller_id"]
+    checks["every sale points to a real listing"] = tx["listing_id"].isin(li["listing_id"]).all()
+    checks["sale seller matches listing seller"] = (seller_of.loc[tx["listing_id"]].values
+                                                    == tx["seller_id"].values).all()
+    users = set(us["user_id"])
+    checks["buyers and sellers exist"] = tx["buyer_id"].isin(users).all() and tx["seller_id"].isin(users).all()
+    checks["nobody buys from themselves"] = (tx["buyer_id"] != tx["seller_id"]).all()
+    lo, hi = tx["ts"].min(), tx["ts"].max()
+    checks["sales inside the 6 month window"] = lo >= pd.Timestamp("2026-01-01") and hi <= pd.Timestamp("2026-07-01")
+    checks["sales happen after the listing is created"] = (
+        li.set_index("listing_id")["created_at"].loc[tx["listing_id"]].values <= tx["ts"].values).all()
+    rf = t["refunds"].merge(tx[["txn_id", "ts", "amount"]], on="txn_id", suffixes=("", "_txn"))
+    checks["every refund points to a real sale"] = len(rf) == len(t["refunds"])
+    checks["refunds come after the sale"] = (rf["ts"] > rf["ts_txn"]).all()
+    checks["refunds never exceed the sale"] = (rf["amount"] <= rf["amount_txn"] + 0.01).all()
+    checks["amounts are positive"] = (tx["amount"] > 0).all() and (t["payouts"]["amount"] > 0).all()
+    for etype, table in ENTITY_TABLE.items():
+        ids = gt_members.loc[gt_members["entity_type"] == etype, "entity_id"]
+        checks[f"answer key {etype} ids all exist"] = ids.isin(t[table][KEYS[table]]).all()
+    for name, ok in checks.items():
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+    if not all(checks.values()):
+        raise SystemExit("Validation failed")
+
+
+def summary(t, cases, members, seconds):
+    tx = t["transactions"]
+    lt = members[(members["entity_type"] == "transaction")].merge(cases, on="case_id")
+    laund = lt[lt["kind"] == "laundering"]
+    decoy = lt[lt["kind"] == "decoy"]
+    lines = ["# Synthetic Data Summary", "",
+             "Generated by `python -m data.generator.generate`. All data is synthetic.", "",
+             "## Tables", "", "| Table | Rows |", "|---|---|"]
+    lines += [f"| {n} | {len(t[n]):,} |" for n in TABLES]
+    lines += ["", "## Planted activity", "",
+              f"- Laundering cases: {(cases['kind'] == 'laundering').sum()}",
+              f"- Decoy users and groups: {(cases['kind'] == 'decoy').sum()}",
+              f"- Laundering transactions: {len(laund):,}, "
+              f"{len(laund) / len(tx):.2%} of all sales",
+              f"- Decoy transactions: {len(decoy):,}, {len(decoy) / len(tx):.2%} of all sales", "",
+              "## Laundering cases by typology", "",
+              "| Typology | Easy | Medium | Hard | Accounts | Transactions |", "|---|---|---|---|---|---|"]
+    c = cases[cases["kind"] == "laundering"]
+    acc = members[members["entity_type"] == "user"].merge(c, on="case_id")
+    for typ, grp in c.groupby("typology", sort=False):
+        d = grp["difficulty"].value_counts()
+        lines.append(f"| {typ} | {d.get('easy', 0)} | {d.get('medium', 0)} | {d.get('hard', 0)} | "
+                     f"{(acc['typology'] == typ).sum()} | {(laund['typology'] == typ).sum():,} |")
+    lines += ["", "## Decoys by type", "", "| Decoy | Groups | Transactions |", "|---|---|---|"]
+    for typ, grp in cases[cases["kind"] == "decoy"].groupby("typology", sort=False):
+        lines.append(f"| {typ} | {len(grp)} | {(decoy['typology'] == typ).sum():,} |")
+    lines += ["", f"Generated in {seconds:.0f} seconds.", ""]
+    return "\n".join(lines)
+
+
+def main():
+    t0 = time.time()
+    cfg = yaml.safe_load(open(ROOT / "config.yaml"))
+    ctx = Ctx(cfg)
+    print("Building normal marketplace activity...")
+    base = normal.build(ctx)
+    print("Planting laundering cases and decoys...")
+    plant(ctx)
+    tables = combine(ctx, base)
+    add_noise(ctx, tables)
+    cases, members = pd.DataFrame(ctx.cases), pd.DataFrame(ctx.members).drop_duplicates()
+    print("Validating...")
+    validate(tables, members)
+
+    out = ROOT / "data" / "raw"
+    out.mkdir(parents=True, exist_ok=True)
+    for f in ["marketplace.duckdb", "ground_truth.duckdb"]:
+        (out / f).unlink(missing_ok=True)
+    with duckdb.connect(str(out / "marketplace.duckdb")) as con:
+        for name, df in tables.items():
+            con.execute(f"CREATE TABLE {name} AS SELECT * FROM df")
+    with duckdb.connect(str(out / "ground_truth.duckdb")) as con:
+        con.execute("CREATE TABLE cases AS SELECT * FROM cases")
+        con.execute("CREATE TABLE case_members AS SELECT * FROM members")
+
+    report = summary(tables, cases, members, time.time() - t0)
+    (ROOT / "docs" / "data_summary.md").write_text(report)
+    print(report)
+
+
+if __name__ == "__main__":
+    main()
